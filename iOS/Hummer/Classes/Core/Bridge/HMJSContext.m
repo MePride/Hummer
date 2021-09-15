@@ -20,7 +20,7 @@
 #import "HMBaseValue.h"
 #import "HMJSGlobal.h"
 #import <Hummer/HMDebug.h>
-
+#import <Hummer/HMWebSocket.h>
 NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSUInteger, HMCLILogLevel) {
@@ -90,6 +90,9 @@ NS_ASSUME_NONNULL_END
     self.context.webSocketHandler = nil;
     [self.webSocketTask cancel];
 #endif
+    [self.webSocketSet enumerateObjectsUsingBlock:^(HMWebSocket * _Nonnull obj, BOOL * _Nonnull stop) {
+        [obj close];
+    }];
 }
 
 + (instancetype)contextInRootView:(UIView *)rootView {
@@ -111,7 +114,7 @@ NS_ASSUME_NONNULL_END
     NSString *jsString = [[NSString alloc] initWithData:dataAsset.data encoding:NSUTF8StringEncoding];
     
 #if __has_include(<Hummer/HMJSExecutor.h>)
-    _context = [[HMJSExecutor alloc] init];
+    _context = HMGetEngineType() == HMEngineTypeNAPI ? [[HMJSExecutor alloc] init] : [[HMJSCExecutor alloc] init];
 #else
     _context = [[HMJSCExecutor alloc] init];
 #endif
