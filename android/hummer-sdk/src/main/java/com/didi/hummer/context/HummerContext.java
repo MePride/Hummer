@@ -104,8 +104,15 @@ public class HummerContext extends ContextWrapper {
     protected HashMap<String, Invoker> mRegistry = new HashMap<>();
     protected HashMap<String, ICallback> mNativeCallbacks = new HashMap<>();
 
-    protected Pattern pattern = Pattern.compile("function *_classCallCheck *\\( *\\w+ *, *\\w+ *\\) *\\{");
-    protected Pattern pattern2 = Pattern.compile("\\s");
+    /**
+     * 全局保存已通过babel转换后的代码
+     */
+    private static final Map<String, String> globalBabelTransScriptMap = new HashMap<>();
+
+    /**
+     * 空白字符通配符（包括换行）
+     */
+    protected Pattern blankCharPattern = Pattern.compile("\\s");
 
     /**
      * 精简版构造函数，只用于JS代码执行，不能用做页面渲染
@@ -336,8 +343,12 @@ public class HummerContext extends ContextWrapper {
     }
 
     private String babelTransformCode(String script, String scriptId) {
-        if (script == null || pattern.matcher(script).find()) {
+        if (script == null || script.contains("__esModule")) {
             return script;
+        }
+
+        if (globalBabelTransScriptMap.containsKey(scriptId)) {
+            return globalBabelTransScriptMap.get(scriptId);
         }
 
         if ("hummer_sdk.js".equals(scriptId)) {
@@ -348,8 +359,10 @@ public class HummerContext extends ContextWrapper {
             return AssetsUtil.readFile("hummer_component.js");
         }
 
+        String orgScript = script;
+
         // 替换换行等特殊字符，否则babel转换会报错
-        if (pattern2.matcher(script).find()) {
+        if (blankCharPattern.matcher(script).find()) {
             // \r -> \\r
             script = script.replace("\\r", "\\\\r");
             // \n -> \\n
@@ -362,8 +375,12 @@ public class HummerContext extends ContextWrapper {
 
         // es6 -> es5
         script = String.format("Babel.transformCode(`%s`);", script);
-        script = (String) mJsContext.evaluateJavaScript(script);
-
+        Object ret = mJsContext.evaluateJavaScript(script);
+        if (!(ret instanceof String)) {
+            return orgScript;
+        }
+        script = (String) ret;
+        globalBabelTransScriptMap.put(scriptId, script);
         return script;
     }
 

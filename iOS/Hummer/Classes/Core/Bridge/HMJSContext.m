@@ -17,9 +17,11 @@
 #import "HMInterceptor.h"
 #import "HMBaseValue.h"
 #import "HMExceptionModel.h"
-#import "HMBaseValue.h"
 #import "HMJSGlobal.h"
+#import <Hummer/HMConfigEntryManager.h>
+#import <Hummer/HMPluginManager.h>
 #import <Hummer/HMDebug.h>
+#import <Hummer/HMConfigEntryManager.h>
 #import <Hummer/HMWebSocket.h>
 NS_ASSUME_NONNULL_BEGIN
 
@@ -42,7 +44,6 @@ static inline HMCLILogLevel convertNativeLogLevel(HMLogLevel logLevel) {
             return HMCLILogLevelWarn;
         case HMLogLevelError:
             return HMCLILogLevelError;
-            
         default:
             // 正常不会传递
             return HMCLILogLevelError;
@@ -102,7 +103,10 @@ NS_ASSUME_NONNULL_END
 }
 
 - (instancetype)init {
+    struct timespec createTimespec;
+    HMClockGetTime(&createTimespec);
     self = [super init];
+    _createTimespec = createTimespec;
     NSBundle *frameworkBundle = [NSBundle bundleForClass:self.class];
     NSString *resourceBundlePath = [frameworkBundle pathForResource:@"Hummer" ofType:@"bundle"];
     NSAssert(resourceBundlePath.length > 0, @"Hummer.bundle 不存在");
@@ -112,7 +116,6 @@ NS_ASSUME_NONNULL_END
     NSDataAsset *dataAsset = [[NSDataAsset alloc] initWithName:@"builtin" bundle:resourceBundle];
     NSAssert(dataAsset, @"builtin dataset 无法在 xcassets 中搜索到");
     NSString *jsString = [[NSString alloc] initWithData:dataAsset.data encoding:NSUTF8StringEncoding];
-    
 #if __has_include(<Hummer/HMJSExecutor.h>)
     _context = HMGetEngineType() == HMEngineTypeNAPI ? [[HMJSExecutor alloc] init] : [[HMJSCExecutor alloc] init];
 #else
@@ -133,17 +136,15 @@ NS_ASSUME_NONNULL_END
                 @"stack": exception.stack ?: @""
         };
         HMLogError(@"%@", exceptionInfo);
-        [interceptors enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-            if ([obj respondsToSelector:@selector(handleJSException:)]) {
-                [obj handleJSException:exceptionInfo];
-                
-                return;
-            }
-            typeof(weakSelf) strongSelf = weakSelf;
-            if ([obj respondsToSelector:@selector(handleJSException:context:)]) {
-                [obj handleJSException:exceptionInfo context:strongSelf];
-            }
-        }];
+        if (weakSelf.nameSpace) {
+            // errorName -> message
+            // errorcode -> type
+            // errorMsg -> stack / type + message + stack
+            [HMConfigEntryManager.manager.configMap[weakSelf.nameSpace].trackEventPlugin trackJavaScriptExceptionWithExceptionModel:exception pageUrl:weakSelf.url.absoluteString ?: @""];
+        }
+        typeof(weakSelf) strongSelf = weakSelf;
+        [HMReporterInterceptor handleJSException:exceptionInfo namespace:strongSelf.nameSpace];
+        [HMReporterInterceptor handleJSException:exceptionInfo context:strongSelf namespace:strongSelf.nameSpace];
     };
     [_context evaluateScript:jsString withSourceURL:[NSURL URLWithString:@"https://www.didi.com/hummer/builtin.js"]];
 
@@ -190,6 +191,9 @@ NS_ASSUME_NONNULL_END
 #endif
 
 - (HMBaseValue *)evaluateScript:(NSString *)javaScriptString fileName:(NSString *)fileName {
+    struct timespec beforeTimespec;
+    HMClockGetTime(&beforeTimespec);
+
     // context 和 WebSocket 对应
     if (!self.url && fileName.length > 0) {
         self.url = [NSURL URLWithString:fileName];
@@ -199,7 +203,6 @@ NS_ASSUME_NONNULL_END
         }
 #endif
     }
-    
 #ifdef HMDEBUG
     if (@available(iOS 13, *)) {
         if (!self.webSocketTask && fileName.length > 0) {
@@ -208,7 +211,7 @@ NS_ASSUME_NONNULL_END
                 urlComponents.scheme = @"ws";
                 urlComponents.user = nil;
                 urlComponents.password = nil;
-                urlComponents.path = nil;
+                urlComponents.path = @"/proxy/native";
                 urlComponents.query = nil;
                 urlComponents.fragment = nil;
                 if (urlComponents.URL) {
@@ -219,14 +222,23 @@ NS_ASSUME_NONNULL_END
                     self.context.webSocketHandler = ^(NSString * _Nullable logString, HMLogLevel logLevel) {
                         typeof(weakSelf) strongSelf = weakSelf;
                         // 避免 "(null)" 情况
-                        NSURLSessionWebSocketMessage *webSocketMessage = [[NSURLSessionWebSocketMessage alloc] initWithString:[NSString stringWithFormat:@"{type:\"log\",data:{level:%lu,message:\"%@\"}}", convertNativeLogLevel(logLevel), logString.length > 0 ? logString : @""]];
-                        // 忽略错误
-                        [strongSelf.webSocketTask sendMessage:webSocketMessage completionHandler:^(NSError * _Nullable error) {
-                            typeof(weakSelf) strongSelf = weakSelf;
-                            if (error) {
-                                [strongSelf handleWebSocket];
-                            }
-                        }];
+                        NSString *jsonStr = @"";
+                        @try {
+                            jsonStr = _HMJSONStringWithObject(@{@"type":@"log",
+                                                      @"data":@{@"level":@(convertNativeLogLevel(logLevel)),
+                                                                @"message":logString.length > 0 ? logString : @""}});
+                        } @catch (NSException *exception) {
+                            HMLogError(@"native webSocket json 失败");
+                        } @finally {
+                            NSURLSessionWebSocketMessage *webSocketMessage = [[NSURLSessionWebSocketMessage alloc] initWithString:jsonStr];
+                            // 忽略错误
+                            [strongSelf.webSocketTask sendMessage:webSocketMessage completionHandler:^(NSError * _Nullable error) {
+                                typeof(weakSelf) strongSelf = weakSelf;
+                                if (error) {
+                                    [strongSelf handleWebSocket];
+                                }
+                            }];
+                        }
                     };
                     // 判断是否连通
                     [self.webSocketTask sendPingWithPongReceiveHandler:^(NSError * _Nullable error) {
@@ -245,7 +257,25 @@ NS_ASSUME_NONNULL_END
     if (fileName.length > 0) {
         url = [NSURL URLWithString:fileName];
     }
-    return [self.context evaluateScript:javaScriptString withSourceURL:url];
+
+    NSData *data = [javaScriptString dataUsingEncoding:NSUTF8StringEncoding];
+    if (data && self.nameSpace) {
+        // 不包括 \0
+        // 单位 KB
+        [HMConfigEntryManager.manager.configMap[self.nameSpace].trackEventPlugin trackJavaScriptBundleWithSize:@(data.length / 1024) pageUrl:self.url.absoluteString ?: @""];
+    }
+
+    HMBaseValue *returnValue = [self.context evaluateScript:javaScriptString withSourceURL:url];
+
+    struct timespec afterTimespec;
+    HMClockGetTime(&afterTimespec);
+    struct timespec resultTimespec;
+    HMDiffTime(&beforeTimespec, &afterTimespec, &resultTimespec);
+    if (self.nameSpace) {
+        [HMConfigEntryManager.manager.configMap[self.nameSpace].trackEventPlugin trackEvaluationWithDuration:@(resultTimespec.tv_sec * 1000 + resultTimespec.tv_nsec / 1000000)  pageUrl:self.url.absoluteString ?: @""];
+    }
+
+    return returnValue;
 }
 
 @end
