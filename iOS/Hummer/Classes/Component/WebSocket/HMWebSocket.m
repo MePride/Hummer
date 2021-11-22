@@ -74,7 +74,7 @@ HM_EXPORT_METHOD(send, send:)
     }
     // 如果当前连接尚未准备好，则忽略错误，或者抛出 JS 异常
     // 正常应当从 onopen 调用后开始 send
-    [self.webSocket sendString:dataString error:nil];
+    [self.webSocket send:dataString];
 }
 
 - (instancetype)initWithHMValues:(NSArray<__kindof HMBaseValue *> *)values {
@@ -109,7 +109,7 @@ HM_EXPORT_METHOD(send, send:)
 - (void)webSocket:(SRWebSocket *)webSocket didReceiveMessageWithString:(NSString *)string {
     HMAssertMainQueue();
     // 调用回调
-    self.onMessage ? self.onMessage(@[string]) : nil;
+    self.onMessage ? self.onMessage(@[@{@"data": string}]) : nil;
 }
 
 // - webSocket:didReceiveMessageWithData: 暂时不实现

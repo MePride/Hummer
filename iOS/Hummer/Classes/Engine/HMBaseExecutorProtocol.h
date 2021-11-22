@@ -142,9 +142,9 @@ typedef HMFunctionType HMFuncCallback;
 
 - (void)setWithValue:(nullable HMBaseValue *)value propertyName:(nullable NSString *)propertyName propertyObject:(nullable id)propertyObject;
 
-- (nullable id <HMBaseWeakValueProtocol>)createWeakValueWithStrongValue:(nullable HMBaseValue *)strongValue;
-
 @optional
+
+- (nullable id <HMBaseWeakValueProtocol>)createWeakValueWithStrongValue:(nullable HMBaseValue *)strongValue DEPRECATED_MSG_ATTRIBUTE("HMJSCExecutor 使用，未来将被废弃");
 
 /// 这个只有 JavaScriptCore 才有
 @property (nonatomic, nullable, copy) NSString *name;
@@ -189,6 +189,8 @@ FOUNDATION_EXPORT NSString *const HUMMER_CALL_NATIVE_SELECTOR_ERROR;
 FOUNDATION_EXPORT NSString *const HUMMER_CALL_NATIVE_METHOD_SIGNATURE_ERROR;
 
 FOUNDATION_EXPORT NSString *const HUMMER_UN_SUPPORT_TYPE_TEMPLATE;
+
+FOUNDATION_EXPORT NSString *const HUMMER_UN_MATCH_ARGS_TYPE_TEMPLATE;
 
 FOUNDATION_EXPORT NSString *const HUMMER_CREATE_ERROR;
 

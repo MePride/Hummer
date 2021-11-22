@@ -1,4 +1,5 @@
 #import "HMJSExecutor+Private.h"
+#import "HMNAPIDebuggerHelper.h"
 #import <Hummer/HMUtility.h>
 #import <Hummer/NSInvocation+Hummer.h>
 #import <Hummer/HMExportClass.h>
@@ -7,13 +8,7 @@
 #import <Hummer/HMExceptionModel.h>
 #import <Hummer/HMJSStrongValue.h>
 #import <objc/runtime.h>
-
-#if __has_include(<Hummer/HMInspectorPackagerConnection.h>)
-
-#import <Hummer/HMInspectorPackagerConnection.h>
-
-static HMInspectorPackagerConnection *inspectorPackagerConnection = nil;
-#endif
+#import <Hummer/HMDebugService.h>
 
 static NSString *const HANDLE_SCOPE_ERROR = @"napi_open_handle_scope() error";
 
@@ -29,11 +24,6 @@ static NSString *const CREATE_STRING_ERROR = @"napi_create_string_utf8() error";
 
 static NSString *const CREATE_EXTERNAL_ERROR = @"napi_create_external() error";
 
-#define CHECK_COMMON(expr) \
-{ \
-    NAPICommonStatus commonStatus = expr; \
-    assert(commonStatus == NAPICommonOK); \
-}
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -60,6 +50,7 @@ static NAPIValue _Nullable setImmediate(NAPIEnv _Nullable env, NAPICallbackInfo 
 @interface HMJSExecutor ()
 
 @property (nonatomic, assign) NAPIEnv env;
+@property (nonatomic, strong) HMNAPIDebuggerHelper *heremsHelper;
 
 - (void)hummerExtractExportWithFunctionPropertyName:(nullable NSString *)functionPropertyName objectRef:(nullable NAPIValue)objectRef target:(id _Nullable *)target selector:(SEL _Nullable *)selector methodSignature:(NSMethodSignature *_Nullable *)methodSignature isSetter:(BOOL)isSetter jsClassName:(nullable NSString *)jsClassName;
 
@@ -112,17 +103,28 @@ static NAPIValue _Nullable setImmediate(NAPIEnv _Nullable env, NAPICallbackInfo 
 NS_ASSUME_NONNULL_END
 
 void hummerFinalize(void *finalizeData, void *finalizeHint) {
-    HMAssertMainQueue();
-    if (!finalizeData) {
-        assert(false);
+  
+    void(^finalizeWork)(void) = ^(){
+        HMAssertMainQueue();
+        if (!finalizeData) {
+            assert(false);
 
-        return;
-    }
-    // 不透明指针可能为原生对象，也可能为闭包
-    // 清空 hmWeakValue
-    HMLogDebug(HUMMER_DESTROY_TEMPLATE, [((__bridge id) finalizeData) class]);
-    [((__bridge id) finalizeData) setHmWeakValue:nil];
-    CFRelease(finalizeData);
+            return;
+        }
+        // 不透明指针可能为原生对象，也可能为闭包
+        // 清空 hmWeakValue
+        HMLogDebug(HUMMER_DESTROY_TEMPLATE, [((__bridge id) finalizeData) class]);
+        [((__bridge id) finalizeData) hm_setWeakValue:nil];
+        CFRelease(finalizeData);
+    };
+#if __has_include(<Hummer/HMInspectorPackagerConnection.h>)
+
+// hermes 调试下，由于 debugger 持有runtime，导致可能存在子线程释放的问题。
+    hm_safe_main_thread(finalizeWork);
+#else
+    finalizeWork();
+#endif
+   
 }
 
 NAPIValue hummerCall(NAPIEnv env, NAPICallbackInfo callbackInfo) {
@@ -230,7 +232,7 @@ NAPIValue hummerCreate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
         return nil;
     }
     // 关联 hm_value
-    opaquePointer.hmWeakValue = [[HMJSWeakValue alloc] initWithValueRef:argv[1] executor:executor];
+    [opaquePointer hm_setWeakValue:[[HMJSWeakValue alloc] initWithValueRef:argv[1] executor:executor]];
     // 引用计数 +1
     HMLogDebug(HUMMER_CREATE_TEMPLATE, className);
     NAPIValue externalValue;
@@ -527,9 +529,8 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
         } else if (HMEncodingTypeIsCNumber(type)) {
             // js 只存在 double 和 bool 类型，但原生需要区分具体类型。
             param = [(HMJSExecutor *) HMCurrentExecutor toNumberWithValueRef:arguments[i + (isClass ? 0 : 1)] isForce:NO];
-        } else {
-            HMLogError(HUMMER_UN_SUPPORT_TYPE_TEMPLATE, objCType);
         }
+        HMAssert(param, HUMMER_UN_MATCH_ARGS_TYPE_TEMPLATE, objCType, [self typeStringOfWithValueRef:arguments[i + (isClass ? 0 : 1)]]);
         [invocation hm_setArgument:param atIndex:i encodingType:type];
     }
     [invocation invoke];
@@ -662,6 +663,32 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
     return valueType;
 }
 
+- (NSString *)typeStringOfWithValueRef:(NAPIValue)valueRef {
+
+    NAPIValueType valueType = [self typeOfWithValueRef:valueRef];
+    switch (valueType) {
+        case NAPIUndefined:
+            return @"undefined";
+        case NAPINull:
+            return @"null";
+        case NAPIBoolean:
+            return @"boolean";
+        case NAPINumber:
+            return @"number";
+        case NAPIString:
+            return @"string";
+        case NAPIObject:
+            return @"object";
+        case NAPIFunction:
+            return @"function";
+        case NAPIExternal:
+            return @"external";
+        default:
+            break;
+    }
+    return @"unknow";
+}
+
 - (BOOL)isDictionaryWithValueRef:(nullable NAPIValue)valueRef {
     if (!valueRef) {
         return NO;
@@ -763,7 +790,8 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
     HMAssertMainQueue();
     NSNumber *returnValue = nil;
     NAPIHandleScope handleScope = nil;
-    if (isForce && [self typeOfWithValueRef:valueRef] != NAPINumber) {
+    NAPIValueType vType = [self typeOfWithValueRef:valueRef];
+    if (isForce && vType != NAPINumber) {
         if (napi_open_handle_scope(self.env, &handleScope) != NAPIErrorOK) {
             NSAssert(NO, HANDLE_SCOPE_ERROR);
 
@@ -774,11 +802,20 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
             goto exit;
         }
     }
-    double doubleValue;
-    if (napi_get_value_double(self.env, valueRef, &doubleValue) != NAPIErrorOK) {
-        goto exit;
+    
+    if (vType == NAPIBoolean) {
+        bool boolValue;
+        if (napi_get_value_bool(self.env, valueRef, &boolValue) != NAPIErrorOK) {
+            goto exit;
+        }
+        returnValue = @(boolValue);
+    }else{
+        double doubleValue;
+        if (napi_get_value_double(self.env, valueRef, &doubleValue) != NAPIErrorOK) {
+            goto exit;
+        }
+        returnValue = @(doubleValue);
     }
-    returnValue = @(doubleValue);
 
     exit:
     if (handleScope) {
@@ -832,13 +869,13 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
         return nil;
     }
     HMAssertMainQueue();
-    id <HMBaseWeakValueProtocol> baseWeakValue = [object hmWeakValue];
-    if ([baseWeakValue isKindOfClass:HMJSWeakValue.class] && ((HMJSWeakValue *) baseWeakValue).executor == self) {
+    HMBaseValue *strongValue = object.hmValue;
+    if (strongValue.context == self) {
+        NSAssert([strongValue isKindOfClass:HMJSStrongValue.class], @"hmValue type error.");
+        
         // 先判断 hmValue，这样后续的闭包转换和原生组件导出可以减少调用
         // 做严格判断，同上下文才能复用 hmValue
-        HMJSWeakValue *weakValue = (HMJSWeakValue *) baseWeakValue;
-
-        return weakValue.valueRef;
+        return ((HMJSStrongValue *) strongValue).valueRef;
     }
     NAPIEscapableHandleScope escapableHandleScope;
     if (napi_open_escapable_handle_scope(self.env, &escapableHandleScope) != NAPIErrorOK) {
@@ -882,7 +919,7 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
         returnValueRef = nil;
         goto exit;
     }
-    object.hmWeakValue = [[HMJSWeakValue alloc] initWithValueRef:returnValueRef executor:self];
+    [object hm_setWeakValue:[[HMJSWeakValue alloc] initWithValueRef:returnValueRef executor:self]];
 
     exit:
     CHECK_COMMON(napi_close_escapable_handle_scope(self.env, escapableHandleScope))
@@ -895,13 +932,13 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
         return nil;
     }
     HMAssertMainQueue();
-    id <HMBaseWeakValueProtocol> baseWeakValue = self.hmWeakValue;
-    if ([baseWeakValue isKindOfClass:HMJSWeakValue.class] && ((HMJSWeakValue *) baseWeakValue).executor == self) {
+    HMBaseValue *strongValue = self.hmValue;
+    if (strongValue.context == self) {
+        NSAssert([strongValue isKindOfClass:HMJSStrongValue.class], @"hmValue type error.");
         // 先判断 hmValue，这样后续的闭包转换和原生组件导出可以减少调用
         // 做严格判断，同上下文才能复用 hmValue
-        HMJSWeakValue *weakValue = (HMJSWeakValue *) baseWeakValue;
 
-        return weakValue.valueRef;
+        return ((HMJSStrongValue *) strongValue).valueRef;
     }
     NAPIEscapableHandleScope escapableHandleScope;
     if (napi_open_escapable_handle_scope(self.env, &escapableHandleScope) != NAPIErrorOK) {
@@ -934,7 +971,7 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
         returnValueRef = nil;
         goto exit;
     }
-    [function setHmWeakValue:[[HMJSWeakValue alloc] initWithValueRef:returnValueRef executor:self]];
+    [function hm_setWeakValue:[[HMJSWeakValue alloc] initWithValueRef:returnValueRef executor:self]];
 
     exit:
     CHECK_COMMON(napi_close_escapable_handle_scope(self.env, escapableHandleScope))
@@ -1144,16 +1181,19 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
         return [self toValueRefWithArray:object];
     } else if ([object isKindOfClass:NSDictionary.class]) {
         return [self toValueRefWithDictionary:object];
-    } else if ([[object hmWeakValue] isKindOfClass:HMJSWeakValue.class] && ((HMJSWeakValue *) [object hmWeakValue]).executor == self) {
-        // 先判断 hmValue，这样后续的闭包转换和原生组件导出可以减少调用
-        // 做严格判断，同上下文才能复用 hmValue
-        HMJSWeakValue *weakValue = (HMJSWeakValue *) [object hmWeakValue];
-
-        return weakValue.valueRef;
-    } else if ([object isKindOfClass:NSClassFromString(@"NSBlock")]) {
-        return [self toValueRefWithFunction:object];
     } else {
-        return [self toValueRefWithNativeObject:object];
+        HMBaseValue *strongValue = [object hmValue];
+        if (strongValue.context == self) {
+            NSAssert([strongValue isKindOfClass:HMJSStrongValue.class], @"hmValue type error.");
+            // 先判断 hmValue，这样后续的闭包转换和原生组件导出可以减少调用
+            // 做严格判断，同上下文才能复用 hmValue
+            
+            return ((HMJSStrongValue *) strongValue).valueRef;
+        } else if ([object isKindOfClass:NSClassFromString(@"NSBlock")]) {
+            return [self toValueRefWithFunction:object];
+        } else {
+            return [self toValueRefWithNativeObject:object];
+        }
     }
 }
 
@@ -1217,7 +1257,7 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
         return nil;
     }
     HMAssertMainQueue();
-    NAPIValue returnValueRef;
+    NAPIValue returnValueRef = nil;
     if (argumentArray.count <= 8) {
         // stack
         NAPIValue valueRefArray[argumentArray.count];
@@ -1457,10 +1497,7 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
         }
         if (isUniqueExecutor) {
             HMExecutorMap = nil;
-#if __has_include(<Hummer/HMInspectorPackagerConnection.h>)
-            [inspectorPackagerConnection closeQuietly];
-            inspectorPackagerConnection = nil;
-#endif
+            [[HMDebugService sharedService] stopDebugConnection];
         }
     });
 }
@@ -1474,6 +1511,7 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
 
     HMAssertMainQueue();
     self = [super init];
+    _heremsHelper = [HMNAPIDebuggerHelper new];
     if (NAPICreateEnv(&self->_env) != NAPIErrorOK) {
         NSAssert(NO, @"NAPICreateEnv() error");
         goto executorMapError;
@@ -1538,18 +1576,6 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
     if ([self popExceptionWithStatus:napi_set_named_property(_env, globalValue, "setImmediate", setImmediateValue)]) {
         goto handleScopeError;
     }
-    
-    if (!inspectorPackagerConnection) {
-        NSString *escapedDeviceName = [[[UIDevice currentDevice] name]
-                stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
-        NSString *escapedAppName = [[[NSBundle mainBundle] bundleIdentifier]
-                stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
-        NSURL *inspectorDeviceUrl = [NSURL URLWithString:[NSString stringWithFormat:@"http://localhost:8081/inspector/device?name=%@&app=%@",
-                                                                                    escapedDeviceName,
-                                                                                    escapedAppName]];
-        inspectorPackagerConnection = [[HMInspectorPackagerConnection alloc] initWithUrl:inspectorDeviceUrl];
-        [inspectorPackagerConnection connect];
-    }
 #endif
 
     return self;
@@ -1567,7 +1593,7 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
 }
 
 - (void)enableDebuggerWithTitle:(nullable NSString *)title {
-    CHECK_COMMON(NAPIEnableDebugger(self.env, title.UTF8String))
+    [self.heremsHelper napiCall_enableDebuggerAndMessageThread:self.env title:title];
 }
 
 - (BOOL)popExceptionWithStatus:(NAPIExceptionStatus)status {
@@ -1642,7 +1668,6 @@ NAPIValue setImmediate(NAPIEnv env, NAPICallbackInfo callbackInfo) {
 //            HMLogError(@"Executor 发生异常：%@", errorModel);
         }
     }
-
 
     exit:
     CHECK_COMMON(napi_close_handle_scope(self.env, handleScope))
