@@ -18,6 +18,8 @@
 #import <Hummer/HMLogger.h>
 #import <Hummer/HMUpgradeManager.h>
 
+NSString * const HMDefaultNamespace = @"namespace.hummer.default";
+
 
 @implementation HMConfigEntry
 
@@ -67,6 +69,143 @@
 }
 
 @end
+
+
+
+@implementation HMRouterInterceptor
+
+/// 自定义方式打开视图控制器
+///
+/// @return 返回YES表示处理，返回NO表示不处理;
+///
++ (BOOL)handleOpenViewController:(__kindof UIViewController *)viewController pageInfo:(HMNavigatorPageInfo *)pageInfo namespace:(NSString *)namespace {
+    
+    // 兼容老代码
+    __block BOOL isHandled = NO;
+    [HMInterceptor enumerateInterceptor:HMInterceptorTypeRouter
+                              withBlock:^(id<HMRouterProtocol> interceptor,
+                                          NSUInteger idx,
+                                          BOOL * _Nonnull stop) {
+        if (![interceptor respondsToSelector:@selector(handleOpenViewController:pageInfo:)]) {
+            return;
+        }
+        BOOL ret = [interceptor handleOpenViewController:viewController pageInfo:pageInfo];
+        if (ret) {
+            isHandled = YES;
+            *stop = YES;
+        }
+    }];
+    if (isHandled) {
+        // 注解已经处理，则忽略新版拦截器。
+        return YES;
+    }
+    
+    // 新版拦截器
+    id<HMRouterProtocol> router = [HMCEMInstance.configMap objectForKey:namespace].routerInterceptor;
+    if ([router respondsToSelector:@selector(handleOpenViewController:pageInfo:)]) {
+        return [router handleOpenViewController:viewController pageInfo:pageInfo];
+    }
+    
+    return NO;
+    
+}
+
++ (BOOL)handlePopWithViewController:(nullable UIViewController *)viewController animated:(BOOL)animated namespace:(NSString *)namespace {
+    
+    
+    // 兼容老代码
+    __block BOOL isHandled = NO;
+    [HMInterceptor enumerateInterceptor:HMInterceptorTypeRouter
+                              withBlock:^(id<HMRouterProtocol> interceptor,
+                                          NSUInteger idx,
+                                          BOOL * _Nonnull stop) {
+        if (![interceptor respondsToSelector:@selector(handlePopWithViewController:animated:)]) {
+            return;
+        }
+        BOOL ret = [interceptor handlePopWithViewController:viewController animated:animated];
+        if (ret) {
+            isHandled = YES;
+            *stop = YES;
+        }
+    }];
+    if (isHandled) {
+        // 注解已经处理，则忽略新版拦截器。
+        return YES;
+    }
+    
+    // 新版拦截器
+    id<HMRouterProtocol> router = [HMCEMInstance.configMap objectForKey:namespace].routerInterceptor;
+    if ([router respondsToSelector:@selector(handlePopWithViewController:animated:)]) {
+        return [router handlePopWithViewController:viewController animated:animated];
+    }    
+    return NO;
+}
+
++ (BOOL)handlePopToRootWithParams:(NSDictionary *)params namespace:(NSString *)namespace {
+    
+    // 兼容老代码
+    __block BOOL isHandled = NO;
+    [HMInterceptor enumerateInterceptor:HMInterceptorTypeRouter
+                              withBlock:^(id<HMRouterProtocol> interceptor,
+                                          NSUInteger idx,
+                                          BOOL * _Nonnull stop) {
+        if (![interceptor respondsToSelector:@selector(handlePopToRootWithParams:)]) {
+            return;
+        }
+        BOOL ret = [interceptor handlePopToRootWithParams:params];
+        if (ret) {
+            isHandled = YES;
+            *stop = YES;
+        }
+    }];
+    if (isHandled) {
+        // 注解已经处理，则忽略新版拦截器。
+        return YES;
+    }
+    
+    // 新版拦截器
+    id<HMRouterProtocol> router = [HMCEMInstance.configMap objectForKey:namespace].routerInterceptor;
+    
+    if ([router respondsToSelector:@selector(handlePopToRootWithParams:)]) {
+        return [router handlePopToRootWithParams:params];
+    }
+    return NO;
+}
+
++ (BOOL)handlePopBackWithCount:(NSUInteger)count params:(NSDictionary *)params namespace:(NSString *)namespace {
+    
+    
+    // 兼容老代码
+    __block BOOL isHandled = NO;
+    // 兼容老拦截器
+    [HMInterceptor enumerateInterceptor:HMInterceptorTypeRouter withBlock:^(id<HMRouterProtocol> interceptor, NSUInteger idx, BOOL * _Nonnull stop) {
+        
+        if (![interceptor respondsToSelector:@selector(handlePopBackWithCount:params:)]) {
+            return;
+        }
+        BOOL ret = [interceptor handlePopBackWithCount:count params:params];
+        if (ret) {
+            isHandled = YES;
+            *stop = YES;
+        }
+    }];
+    
+    if (isHandled) {
+        // 注解已经处理，则忽略新版拦截器。
+        return YES;
+    }
+    
+    // 新版拦截器
+    id<HMRouterProtocol> router = [HMCEMInstance.configMap objectForKey:namespace].routerInterceptor;
+    
+    if ([router respondsToSelector:@selector(handlePopBackWithCount:params:)]) {
+        return [router handlePopBackWithCount:count params:params];
+    }
+    return NO;
+}
+
+@end
+
 
 @implementation HMImageLoaderInterceptor
 // 不需要兼容
@@ -143,7 +282,7 @@
     //无默认实现
 }
 + (void)handleJSException:(NSDictionary *)exception context:(HMJSContext *)context namespace:(nonnull NSString *)namespace{
- 
+    
     // 兼容老拦截器
     NSArray<id<HMReporterProtocol>> *interceptors = [HMInterceptor interceptor:HMInterceptorTypeReporter];
     if (interceptors.count <= 0) {
@@ -159,7 +298,7 @@
     id<HMReporterProtocol> interceptor = [HMCEMInstance.configMap objectForKey:namespace].reporterInterceptor;
     [interceptor handleJSException:exception context:context];
     //无默认实现
-
+    
 }
 + (void)handleJSPerformanceWithKey:(NSString *)key info:(NSDictionary *)info namespace:(nonnull NSString *)namespace{
     // 兼容老拦截器
@@ -177,7 +316,7 @@
     id<HMReporterProtocol> interceptor = [HMCEMInstance.configMap objectForKey:namespace].reporterInterceptor;
     [interceptor handleJSPerformanceWithKey:key info:info];
     //无默认实现
-
+    
 }
 
 @end
@@ -247,8 +386,8 @@
         for (id <HMEventTrackProtocol> interceptor in interceptors) {
             
             if ([interceptor respondsToSelector:@selector(asyncHandleTrackEvent:)]) {
-                               
-                    [interceptor asyncHandleTrackEvent:event];
+                
+                [interceptor asyncHandleTrackEvent:event];
             }
         }
     }
@@ -256,7 +395,8 @@
     // 新拦截器
     id<HMEventTrackProtocol> interceptor = [HMCEMInstance.configMap objectForKey:namespace].eventTrackInterceptor;
     if ([interceptor respondsToSelector:@selector(asyncHandleTrackEvent:)]) {
-            [interceptor asyncHandleTrackEvent:event];
+        
+        [interceptor asyncHandleTrackEvent:event];
     }
 }
 
@@ -275,7 +415,7 @@ static NSMutableDictionary<NSString *, id<HMStorage>> *__HMStorageAdaptor_map;
 }
 
 + (id<HMStorage>)storageWithNamespace:(NSString *)namespace {
-
+    
     // 如果实现了 业务线自定义拦截器。则直接返回
     id<HMStorage> _storage = [HMCEMInstance.configMap objectForKey:namespace].storage;
     if (_storage) {
