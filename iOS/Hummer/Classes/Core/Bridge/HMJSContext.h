@@ -7,6 +7,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Hummer/HMBaseExecutorProtocol.h>
+#import <Hummer/HMJSContextDefines.h>
 
 @class HMBaseValue, HMNotifyCenter, HMExceptionModel;
 
@@ -25,6 +26,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @protocol HMJSContextDelegate <NSObject>
 @optional
+
+- (void)context:(HMJSContext *)context didRenderFailed:(NSError *)error;
 - (void)context:(HMJSContext *)context didRenderPage:(HMBaseValue *)page;
 - (void)context:(HMJSContext *)context reloadBundle:(NSDictionary *)bundleInfo;
 
@@ -47,6 +50,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, nullable, copy) NSString *pageId;
 
+@property (nonatomic, nullable, strong) NSDictionary *pageInfo;
 /**
  * 只读
  */
@@ -83,7 +87,6 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable HMBaseValue *)evaluateScript:(nullable NSString *)javaScriptString fileName:(nullable NSString *)fileName;
 
 - (nullable HMBaseValue *)evaluateScript:(nullable NSString *)javaScriptString fileName:(nullable NSString *)fileName hummerUrl:(nullable NSString *)hummerUrl;
-
 
 NS_ASSUME_NONNULL_END
 

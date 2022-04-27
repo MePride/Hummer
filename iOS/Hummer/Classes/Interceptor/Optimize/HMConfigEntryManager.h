@@ -10,13 +10,15 @@
 #import <Hummer/HMNamespaceScope.h>
 #import <Hummer/HMImageLoader.h>
 #import <Hummer/HMJSLoaderProtocol.h>
-#import <Hummer/HMJSCallerIterceptor.h>
+#import <Hummer/HMJSCallerProtocol.h>
 #import <Hummer/HMLoggerProtocol.h>
 #import <Hummer/HMReporterProtocol.h>
 #import <Hummer/HMEventTrackProtocol.h>
 #import <Hummer/HMMemoryComponent.h>
 #import <Hummer/HMPluginManager.h>
 #import <Hummer/HMRouterProtocol.h>
+#import <Hummer/HMRequestComponent.h>
+#import <Hummer/HMNetworkProtocol.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -34,15 +36,20 @@ extern NSString * const HMDefaultNamespace;
 //替换默认 storage 实现
 @property (nonatomic, strong) id<HMStorage> storage;
 
+//替换默认 request 实现
+@property (nonatomic, strong) Class<HMRequestComponent> request;
+
 @property (nonatomic, strong) id<HMImageLoader> imageLoaderInterceptor;
 
 @property (nonatomic, strong) Class<HMJSLoader> jsLoaderInterceptor;
 
-@property (nonatomic, strong) id<HMJSCallerIterceptor> jsCallerInterceptor;
+@property (nonatomic, strong) id<HMJSCallerProtocol> jsCallerInterceptor;
 
 @property (nonatomic, strong) id<HMLoggerProtocol> loggerInterceptor;
 
 @property (nonatomic, strong) id<HMReporterProtocol> reporterInterceptor;
+
+@property (nonatomic, strong) id<HMRequestInterceptor> requestInterceptor;
 
 @property (nonatomic, strong, readwrite) id<HMEventTrackProtocol> eventTrackInterceptor;
 
@@ -91,6 +98,12 @@ extern NSString * const HMDefaultNamespace;
 + (id<HMImageLoader>)canLoad:(id<HMURLConvertible>)source inJSBundleSource:(id<HMURLConvertible>)bundleSource namespace:(NSString *)namespace;
 @end
 
+@class HMRequest;
+@interface HMRequestInterceptor : NSObject
+
++ (void)willSendRequest:(HMRequest *)request inContext:(HMJSContext *)context;
++ (void)HMRequest:(HMRequest *)request didReceiveResponse:(NSDictionary *)response inContext:(HMJSContext *)context;
+@end
 
 @interface HMJSLoaderInterceptor : NSObject
 
@@ -103,10 +116,10 @@ extern NSString * const HMDefaultNamespace;
 @end
 
 
-@interface HMJSCallerIterceptor : NSObject
+@interface HMJSCallerInterceptor : NSObject
 
-+ (void)callWithTarget:(id)target selector:(SEL)selector namespace:(NSString *)namespace;
-+ (void)callWithJSClassName:(NSString *)className functionName:(NSString *)functionName namespace:(NSString *)namespace;
++ (void)callNativeWithClassName:(NSString *)className functionName:(NSString *)functionName objectRef:(NSString *)objectRef args:(NSArray<HMBaseValue *> *)args context:(HMJSContext *)context;
++ (void)callJSWithTarget:(HMBaseValue *)target functionName:(NSString *)functionName args:(NSArray *)args context:(HMJSContext *)context;
 @end
 
 
@@ -161,4 +174,10 @@ extern NSString * const HMDefaultNamespace;
 
 @end
 
+
+@interface HMRequestAdaptor : NSObject
+
++ (nullable id<HMRequestComponent>)createComponentWithNamespace:(NSString *)namespace;
+
+@end
 NS_ASSUME_NONNULL_END
