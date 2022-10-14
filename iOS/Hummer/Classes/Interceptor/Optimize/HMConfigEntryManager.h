@@ -19,10 +19,12 @@
 #import <Hummer/HMRouterProtocol.h>
 #import <Hummer/HMRequestComponent.h>
 #import <Hummer/HMNetworkProtocol.h>
+#import <Hummer/HMFontProtocol.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 extern NSString * const HMDefaultNamespace;
+extern NSString * const HMDefaultNamespaceUnderline;
 
 /**
  * hummer sdk 初始化注入配置, 分为拦截器和插件。使用 namespace 区分
@@ -57,7 +59,7 @@ extern NSString * const HMDefaultNamespace;
 
 @property(nonatomic, nullable, strong) id <HMRouterProtocol> routerInterceptor;
 
-
+@property(nonatomic, nullable, strong) id <HMFontProtocol> fontAdapter;
 @end
 
 
@@ -178,6 +180,12 @@ extern NSString * const HMDefaultNamespace;
 @interface HMRequestAdaptor : NSObject
 
 + (nullable id<HMRequestComponent>)createComponentWithNamespace:(NSString *)namespace;
+
+@end
+
+@interface HMFontAdaptor : NSObject
+
++ (nullable id<HMFontProtocol>)fontWithNamespace:(NSString *)namespace;
 
 @end
 NS_ASSUME_NONNULL_END

@@ -6,17 +6,14 @@ import android.support.annotation.NonNull;
 import android.text.TextUtils;
 import android.widget.Toast;
 
-import com.didi.hummer.adapter.HummerAdapter;
 import com.didi.hummer.adapter.http.HttpCallback;
 import com.didi.hummer.adapter.navigator.NavPage;
-import com.didi.hummer.adapter.tracker.ITrackerAdapter;
-import com.didi.hummer.adapter.tracker.PerfCustomInfo;
-import com.didi.hummer.adapter.tracker.PerfInfo;
 import com.didi.hummer.context.HummerContext;
-import com.didi.hummer.core.BuildConfig;
 import com.didi.hummer.core.engine.JSValue;
 import com.didi.hummer.core.engine.base.ICallback;
+import com.didi.hummer.core.engine.jsc.jni.HummerException;
 import com.didi.hummer.core.engine.napi.jni.JSException;
+import com.didi.hummer.core.exception.ExceptionCallback;
 import com.didi.hummer.core.util.DebugUtil;
 import com.didi.hummer.core.util.HMGsonUtil;
 import com.didi.hummer.devtools.DevToolsConfig;
@@ -26,11 +23,11 @@ import com.didi.hummer.utils.AssetsUtil;
 import com.didi.hummer.utils.FileUtil;
 import com.didi.hummer.utils.JsSourceUtil;
 import com.didi.hummer.utils.NetworkUtil;
+import com.didi.hummer.utils.UIThreadUtil;
 import com.google.gson.reflect.TypeToken;
 
 import java.io.File;
 import java.io.Serializable;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -45,9 +42,7 @@ public class HummerRender {
     private AtomicBoolean isDestroyed = new AtomicBoolean(false);
     private HummerRenderCallback renderCallback;
     private HummerDevTools devTools;
-    private ITrackerAdapter trackerAdapter;
-    private PerfInfo perfInfo = new PerfInfo();
-    private long startTime;
+    private HummerPageTracker tracker;
 
     public interface HummerRenderCallback {
         void onSucceed(HummerContext hmContext, JSValue jsPage);
@@ -63,24 +58,33 @@ public class HummerRender {
     }
 
     public HummerRender(@NonNull HummerLayout container, String namespace, DevToolsConfig config) {
-        startTime = System.currentTimeMillis();
+        tracker = new HummerPageTracker(namespace);
+        tracker.trackContextInitStart();
         hmContext = Hummer.createContext(container, namespace);
-
-        JSException.addJSContextExceptionCallback(hmContext.getJsContext(), e -> {
-            if (trackerAdapter != null) {
-                trackerAdapter.trackException(hmContext.getPageUrl(), e);
-            }
-        });
+        tracker.trackContextInitEnd();
 
         if (DebugUtil.isDebuggable()) {
             devTools = new HummerDevTools(hmContext, config);
         }
 
-        trackerAdapter = HummerAdapter.getTrackerAdapter(hmContext.getNamespace());
-        if (trackerAdapter != null) {
-            trackerAdapter.trackEvent(ITrackerAdapter.EventName.CONTEXT_CREATE, null);
+        ExceptionCallback cb = e -> {
+            if (tracker != null && hmContext != null) {
+                tracker.trackException(hmContext.getPageUrl(), e);
+            }
+        };
+        if (HummerSDK.getJsEngine() == HummerSDK.JsEngine.NAPI_QJS
+                || HummerSDK.getJsEngine() == HummerSDK.JsEngine.NAPI_HERMES) {
+            JSException.addJSContextExceptionCallback(hmContext.getJsContext(), cb);
+        } else {
+            HummerException.addJSContextExceptionCallback(hmContext.getJsContext(), cb);
         }
-        perfInfo.ctxInitTimeCost = System.currentTimeMillis() - startTime;
+
+        // 设置JS主动触发渲染完成的回调，只有在公共包抽离模式下才需要真正触发回调
+        hmContext.setRenderListener(isRenderSuccess -> {
+            if (isSplitChunksMode()) {
+                onRenderFinish(isRenderSuccess);
+            }
+        });
     }
 
     public HummerContext getHummerContext() {
@@ -106,15 +110,12 @@ public class HummerRender {
     public void onDestroy() {
         isDestroyed.set(true);
         hmContext.onDestroy();
-
-        if (trackerAdapter != null) {
-            trackerAdapter.trackEvent(ITrackerAdapter.EventName.CONTEXT_DESTROY, null);
-        }
+        tracker.trackContextDestroy();
 
         if (DebugUtil.isDebuggable()) {
             HummerDebugger.release(hmContext);
             if (devTools != null) {
-                devTools.release();
+                devTools.release(hmContext);
             }
         }
     }
@@ -132,32 +133,42 @@ public class HummerRender {
             return;
         }
 
-        long startTime = System.currentTimeMillis();
-
-        if (trackerAdapter != null) {
-            trackerAdapter.trackEvent(ITrackerAdapter.EventName.JS_EVAL_START, null);
-        }
-
+        tracker.trackRenderStart(hmContext.getPageUrl());
         hmContext.setJsSourcePath(sourcePath);
-        hmContext.evaluateJavaScript(js, sourcePath);
 
-        if (trackerAdapter != null) {
-            trackerAdapter.trackEvent(ITrackerAdapter.EventName.JS_EVAL_FINISH, null);
+        tracker.trackJSEvalStart(js.length(), sourcePath);
+        if (HummerSDK.isSupportBytecode(hmContext.getNamespace())) {
+            hmContext.evaluateJavaScriptAsync(js, sourcePath, ret -> {
+                processRenderFinish();
+            });
+        } else {
+            hmContext.evaluateJavaScript(js, sourcePath);
+            processRenderFinish();
         }
+    }
 
-        boolean isRenderSuccess = getHummerContext().getJsPage() != null;
-        float jsSize = js.length() / 1024f;
-        long timeCost = System.currentTimeMillis() - startTime;
-        perfInfo.jsBundleSize = jsSize;
-        perfInfo.jsEvalTimeCost = timeCost;
+    public void render(byte[] bytecode, String sourcePath) {
+        if (bytecode == null || bytecode.length <= 0 || isDestroyed.get()) {
+            return;
+        }
+        tracker.trackRenderStart(hmContext.getPageUrl());
+        hmContext.setJsSourcePath(sourcePath);
 
-        Map<String, Object> params = new HashMap<>();
-        params.put(ITrackerAdapter.ParamKey.IS_RENDER_SUCCESS, isRenderSuccess);
-        params.put(ITrackerAdapter.ParamKey.SDK_VERSION, BuildConfig.VERSION_NAME);
-        params.put(ITrackerAdapter.ParamKey.PAGE_URL, sourcePath);
-        params.put(ITrackerAdapter.ParamKey.RENDER_TIME_COST, timeCost);
-        params.put(ITrackerAdapter.ParamKey.JS_SIZE, jsSize);
+        tracker.trackJSEvalStart(bytecode.length, sourcePath);
+        hmContext.evaluateBytecode(bytecode);
+        processRenderFinish();
+    }
 
+    private void processRenderFinish() {
+        if (tracker != null) {
+            tracker.trackJSEvalFinish();
+        }
+        if (!isSplitChunksMode()) {
+            onRenderFinish(hmContext.getJsPage() != null);
+        }
+    }
+
+    private void onRenderFinish(boolean isRenderSuccess) {
         if (renderCallback != null) {
             if (isRenderSuccess) {
                 renderCallback.onSucceed(hmContext, getHummerContext().getJsPage());
@@ -166,18 +177,14 @@ public class HummerRender {
             }
         }
 
-        // 这里加一个判断，用于过滤开发阶段hot reload时的重复累加计算和埋点上报
-        if (perfInfo.pageRenderTimeCost == 0) {
-            perfInfo.pageRenderTimeCost = System.currentTimeMillis() - this.startTime;
-            if (trackerAdapter != null) {
-                if (isRenderSuccess) {
-                    trackerAdapter.trackPageSuccess(hmContext.getPageUrl());
-                }
-                trackerAdapter.trackPerfInfo(hmContext.getPageUrl(), perfInfo);
-                trackerAdapter.trackPerfCustomInfo(hmContext.getPageUrl(), new PerfCustomInfo("whiteScreenRate", "白屏率", "%", isRenderSuccess ? 0 : 100));
-                trackerAdapter.trackEvent(ITrackerAdapter.EventName.RENDER_FINISH, params);
-            }
+        if (tracker != null) {
+            tracker.trackRenderFinish(isRenderSuccess);
         }
+    }
+
+    private boolean isSplitChunksMode() {
+        JSValue hv = hmContext.getJsContext().getJSValue("Hummer");
+        return hv != null && hv.getBoolean("isSplitChunksMode");
     }
 
     public void renderWithUrl(String url) {
@@ -189,7 +196,7 @@ public class HummerRender {
             // 调试插件
             HummerDebugger.init(hmContext, url);
 
-            // 热更新
+            // 热重载
             if (devTools != null) {
                 devTools.initConnection(hmContext, url, () -> {
                     requestJsBundle(url, true);
@@ -200,8 +207,8 @@ public class HummerRender {
         requestJsBundle(url, false);
     }
 
-    private void requestJsBundle(String url, boolean isRefresh) {
-        long startTime = System.currentTimeMillis();
+    private void requestJsBundle(String url, boolean isHotReload) {
+        tracker.trackJSFetchStart();
         NetworkUtil.httpGet(url, (HttpCallback<String>) response -> {
             if (isDestroyed.get()) {
                 if (renderCallback != null) {
@@ -224,16 +231,18 @@ public class HummerRender {
                 return;
             }
 
-            perfInfo.jsFetchTimeCost = (System.currentTimeMillis() - startTime);
+            if (tracker != null) {
+                tracker.trackJSFetchFinish();
+            }
 
             // 如果是刷新流程，那么在执行JS之前，需要先模拟走一遍生命周期，来做相关的清理工作
-            if (DebugUtil.isDebuggable() && isRefresh) {
-                hmContext.onRefresh();
+            if (DebugUtil.isDebuggable() && isHotReload) {
+                hmContext.onHotReload(url);
             }
 
             render(response.data, url);
 
-            if (DebugUtil.isDebuggable() && isRefresh) {
+            if (DebugUtil.isDebuggable() && isHotReload) {
                 Toast.makeText(hmContext, "页面已刷新", Toast.LENGTH_SHORT).show();
             }
         });
@@ -258,7 +267,12 @@ public class HummerRender {
             assetsPath = assetsPath.substring(1);
         }
 
-        render(AssetsUtil.readFile(assetsPath), JsSourceUtil.JS_SOURCE_PREFIX_ASSETS + assetsPath);
+        String finalAssetsPath = assetsPath;
+        new Thread(() -> {
+            String js = AssetsUtil.readFile(finalAssetsPath);
+            String sourcePath = JsSourceUtil.JS_SOURCE_PREFIX_ASSETS + finalAssetsPath;
+            UIThreadUtil.runOnUiThread(() -> render(js, sourcePath));
+        }).start();
     }
 
     public void renderWithFile(String jsFilePath) {
@@ -280,17 +294,15 @@ public class HummerRender {
             jsFilePath = jsFilePath.substring(1);
         }
 
-        render(FileUtil.readFile(jsFilePath), JsSourceUtil.JS_SOURCE_PREFIX_FILE + jsFilePath);
+        String finalJsFilePath = jsFilePath;
+        new Thread(() -> {
+            String js = FileUtil.readFile(finalJsFilePath);
+            String sourcePath = JsSourceUtil.JS_SOURCE_PREFIX_FILE + finalJsFilePath;
+            UIThreadUtil.runOnUiThread(() -> render(js, sourcePath));
+        }).start();
     }
 
     public void renderWithFile(File jsFile) {
-        if (isDestroyed.get()) {
-            if (renderCallback != null) {
-                renderCallback.onFailed(new RuntimeException("Page is destroyed!"));
-            }
-            return;
-        }
-
         if (jsFile == null || !jsFile.exists()) {
             if (renderCallback != null) {
                 renderCallback.onFailed(new RuntimeException("js file is not exists!"));
@@ -298,7 +310,7 @@ public class HummerRender {
             return;
         }
 
-        render(FileUtil.readFile(jsFile), JsSourceUtil.JS_SOURCE_PREFIX_FILE + jsFile.getAbsolutePath());
+        renderWithFile(jsFile.getAbsolutePath());
     }
 
     public void setRenderCallback(HummerRenderCallback renderCallback) {
@@ -327,13 +339,13 @@ public class HummerRender {
         if (isDestroyed.get()) {
             return;
         }
-        hmContext.getJsContext().getJSValue("Hummer").set("pageInfo", page);
+        JSValue hv = hmContext.getJsContext().getJSValue("Hummer");
+        if (hv != null) {
+            hv.set("pageInfo", page);
+        }
         hmContext.setPageUrl(page.url);
         hmContext.setJsSourcePath(page.sourcePath);
-
-        if (trackerAdapter != null) {
-            trackerAdapter.trackPageView(page.url);
-        }
+        tracker.trackPageView(page.url);
     }
 
     /**
